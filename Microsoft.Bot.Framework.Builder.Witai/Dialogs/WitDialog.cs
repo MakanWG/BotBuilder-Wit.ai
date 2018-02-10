@@ -9,6 +9,8 @@ using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
 using Microsoft.Bot.Framework.Builder.Exceptions;
+using Newtonsoft.Json;
+using Microsoft.Bot.Framework.Builder.Witai.Exceptions;
 
 namespace Microsoft.Bot.Framework.Builder.Witai.Dialogs
 {
@@ -32,17 +34,44 @@ namespace Microsoft.Bot.Framework.Builder.Witai.Dialogs
         }
     }
 
-    public delegate Task ActionHandler(IDialogContext context, WitResult witResult);
+	[AttributeUsage(AttributeTargets.Method, AllowMultiple = true, Inherited = true)]
+	[Serializable]
+	public class WitIntentAttribute : AttributeString
+	{
+		public readonly string ActionName;
+
+		public WitIntentAttribute(string actionName)
+		{
+			SetField.NotNull(out this.ActionName, nameof(actionName), actionName);
+		}
+
+		protected override string Text
+		{
+			get
+			{
+				return this.ActionName;
+			}
+		}
+	}
+
+
+
+	public delegate Task ActionHandler(IDialogContext context, WitResult witResult);
 
     public delegate Task ActionActivityHandler(IDialogContext context, IAwaitable<IMessageActivity> message, WitResult witResult);
 
-    [Serializable]
+	public delegate Task IntentHandler(IDialogContext context, WitResult witResult);
+
+	public delegate Task IntentActivityHandler(IDialogContext context, IAwaitable<IMessageActivity> message, WitResult witResult);
+
+	[Serializable]
     public class WitDialog<TResult> : IDialog<TResult>
     {
         protected readonly IWitService service;
        
         [NonSerialized]
         protected Dictionary<string, ActionActivityHandler> handlerByAction;
+		protected Dictionary<string, IntentActivityHandler> handlerByIntent;
         protected IWitContext WitContext;
         private string WitSessionId;
 
@@ -112,6 +141,9 @@ namespace Microsoft.Bot.Framework.Builder.Witai.Dialogs
                     case "error":
                         WitErrorHandler(context, item, result);
                         break;
+						case "intent":
+						await DispatchToIntentHandler(context, item, result);
+						break;
                     default:
                         throw new UnsupportedWitActionException($"Action {result.Type} is not supported");
                 }
@@ -161,12 +193,40 @@ namespace Microsoft.Bot.Framework.Builder.Witai.Dialogs
             }
         }
 
+		protected virtual async Task DispatchToIntentHandler(IDialogContext context, IAwaitable<IMessageActivity> item, WitResult result)
+		{
+			if (this.handlerByIntent == null)
+			{
+				this.handlerByIntent = new Dictionary<string, IntentActivityHandler>(GetHandlersByIntent());
+			}
+
+			IntentActivityHandler handler = null;
+			if (!result.Entities.Any(entity => entity.Key == "intent") || !this.handlerByIntent.TryGetValue(result.Entities.Where(entity => entity.Key == "intent").SelectMany(intent => intent.Value).OrderByDescending(intent => intent.Confidence).FirstOrDefault().Value, out handler))
+			{
+				handler = this.handlerByIntent[string.Empty];
+			}
+
+			if (handler != null)
+			{
+				await handler(context, item, result);
+			}
+			else
+			{
+				throw new IntentHandlerNotFoundException("No default intent handler found.");
+			}
+		}
+
         protected virtual IDictionary<string, ActionActivityHandler> GetHandlersByAction()
         {
-            return WitDialog.EnumerateHandlers(this).ToDictionary(kv => kv.Key, kv => kv.Value);
+            return WitDialog.EnumerateActionHandlers(this).ToDictionary(kv => kv.Key, kv => kv.Value);
         }
 
-        protected virtual Task<string> GetWitQueryTextAsync(IDialogContext context, IMessageActivity message)
+		protected virtual IDictionary<string, IntentActivityHandler> GetHandlersByIntent()
+		{
+			return WitDialog.EnumerateIntentHandlers(this).ToDictionary(kv => kv.Key, kv => kv.Value);
+		}
+
+		protected virtual Task<string> GetWitQueryTextAsync(IDialogContext context, IMessageActivity message)
         {
             return Task.FromResult(message.Text);
         }
@@ -174,7 +234,7 @@ namespace Microsoft.Bot.Framework.Builder.Witai.Dialogs
 
     internal static class WitDialog
     {
-        public static IEnumerable<KeyValuePair<string, ActionActivityHandler>> EnumerateHandlers(object dialog)
+        public static IEnumerable<KeyValuePair<string, ActionActivityHandler>> EnumerateActionHandlers(object dialog)
         {
             var type = dialog.GetType();
             var methods = type.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
@@ -234,5 +294,66 @@ namespace Microsoft.Bot.Framework.Builder.Witai.Dialogs
                 }
             }
         }
-    }
+
+		public static IEnumerable<KeyValuePair<string, IntentActivityHandler>> EnumerateIntentHandlers(object dialog)
+		{
+			var type = dialog.GetType();
+			var methods = type.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+			foreach (var method in methods)
+			{
+				var actions = method.GetCustomAttributes<WitIntentAttribute>(inherit: true).ToArray();
+				IntentActivityHandler intentHandler = null;
+
+				try
+				{
+					intentHandler = (IntentActivityHandler)Delegate.CreateDelegate(typeof(IntentActivityHandler), dialog, method, throwOnBindFailure: false);
+				}
+				catch (ArgumentException)
+				{
+					// "Cannot bind to the target method because its signature or security transparency is not compatible with that of the delegate type."
+					// https://github.com/Microsoft/BotBuilder/issues/634
+					// https://github.com/Microsoft/BotBuilder/issues/435
+				}
+
+				// fall back for compatibility
+				if (intentHandler == null)
+				{
+					try
+					{
+						var handler = (IntentHandler)Delegate.CreateDelegate(typeof(IntentHandler), dialog, method, throwOnBindFailure: false);
+
+						if (handler != null)
+						{
+							// thunk from new to old delegate type
+							intentHandler = (context, message, result) => handler(context, result);
+						}
+					}
+					catch (ArgumentException)
+					{
+						// "Cannot bind to the target method because its signature or security transparency is not compatible with that of the delegate type."
+						// https://github.com/Microsoft/BotBuilder/issues/634
+						// https://github.com/Microsoft/BotBuilder/issues/435
+					}
+				}
+
+				if (intentHandler != null)
+				{
+					var actionNames = actions.Select(i => i.ActionName).DefaultIfEmpty(method.Name);
+
+					foreach (var actionName in actionNames)
+					{
+						var key = string.IsNullOrWhiteSpace(actionName) ? string.Empty : actionName;
+						yield return new KeyValuePair<string, IntentActivityHandler>(actionName, intentHandler);
+					}
+				}
+				else
+				{
+					if (actions.Length > 0)
+					{
+						throw new Exceptions.InvalidIntentHandlerException(string.Join(";", actions.Select(i => i.ActionName)), method);
+					}
+				}
+			}
+		}
+	}
 }

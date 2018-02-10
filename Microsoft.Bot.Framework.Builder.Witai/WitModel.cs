@@ -1,6 +1,7 @@
 ﻿using Microsoft.Bot.Builder.Internals.Fibers;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 
 namespace Microsoft.Bot.Framework.Builder.Witai
 {
@@ -25,7 +26,7 @@ namespace Microsoft.Bot.Framework.Builder.Witai
 
         public static readonly IReadOnlyDictionary<WitApiVersion, Uri> WitEndpoints = new Dictionary<WitApiVersion, Uri>()
         {
-            {WitApiVersion.Standard, new Uri("https://api.wit.ai/converse?v=20160526")}
+            {WitApiVersion.Standard, new Uri($"https://api.wit.ai/message")}
         };
 
         /// <summary>
