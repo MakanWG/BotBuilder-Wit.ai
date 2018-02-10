@@ -71,6 +71,7 @@ namespace Microsoft.Bot.Framework.Builder.Witai.Dialogs
        
         [NonSerialized]
         protected Dictionary<string, ActionActivityHandler> handlerByAction;
+		[NonSerialized]
 		protected Dictionary<string, IntentActivityHandler> handlerByIntent;
         protected IWitContext WitContext;
         private string WitSessionId;
@@ -108,10 +109,10 @@ namespace Microsoft.Bot.Framework.Builder.Witai.Dialogs
         public virtual async Task StartAsync(IDialogContext context)
         {
             
-            context.Wait(MessageReceived);
+            context.Wait(MessageReceivedAsync);
         }
         
-        protected virtual async Task MessageReceived(IDialogContext context, IAwaitable<IMessageActivity> item)
+        protected virtual async Task MessageReceivedAsync(IDialogContext context, IAwaitable<IMessageActivity> item)
         {
             await MessageHandler(context, item);
         }
@@ -142,6 +143,7 @@ namespace Microsoft.Bot.Framework.Builder.Witai.Dialogs
                         WitErrorHandler(context, item, result);
                         break;
 						case "intent":
+						hasNextStep = false; //not an action handler
 						await DispatchToIntentHandler(context, item, result);
 						break;
                     default:
