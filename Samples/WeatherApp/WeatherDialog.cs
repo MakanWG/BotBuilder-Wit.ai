@@ -26,6 +26,19 @@ namespace WitWeather
             this.WitContext["forecast"] =  temp;
         }
 
+		[WitIntent("forecast")]
+		public async Task HandleForecastIntent(IDialogContext context, WitResult result)
+		{
+			//adding location to context
+			this.WitContext["location"] = result.Entities["location"][0].Value;
+
+			//yahoo weather API
+			var temp = await GetWeather(this.WitContext["location"]);
+
+			//adding temp to context
+			this.WitContext["forecast"] = temp;
+		}
+
         private async Task<int> GetWeather(object location)
         {
             //weather API request
